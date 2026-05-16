@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Login</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<nav>
+  <a href="/">Login</a>
+  <a href="/register">Register</a>
+</nav>
+
+<div class="container">
+
+  <h1>Login</h1>
+
+  <form action="/auth/login" method="POST">
+
+    <input
+      type="email"
+      name="email"
+      placeholder="Enter Email"
+      required
+    >
+
+    <input
+      type="password"
+      name="password"
+      placeholder="Enter Password"
+      required
+    >
+
+    <button type="submit">Login</button>
+
+  </form>
+
+</div>
+
+</body>
+</html>

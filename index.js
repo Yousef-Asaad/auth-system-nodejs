@@ -6,7 +6,6 @@ const { sql, connectDB } = require("./db");
 
 const app = express();
 
-// ================= MIDDLEWARE =================
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
@@ -20,146 +19,172 @@ app.use(
   })
 );
 
-//  CONNECT DB 
 connectDB();
 
-
-//  ROUTES 
-
-// LOGIN PAGE
+// ================= PAGES =================
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "views", "login.html"));
 });
 
-// REGISTER PAGE
 app.get("/register", (req, res) => {
   res.sendFile(path.join(__dirname, "views", "register.html"));
 });
 
-// HOME PAGE (protected)
 app.get("/home", (req, res) => {
-  if (!req.session.user) {
-    return res.redirect("/");
-  }
-
+  if (!req.session.user) return res.redirect("/");
   res.sendFile(path.join(__dirname, "views", "home.html"));
 });
 
-
-//  REGISTER 
+// ================= REGISTER =================
 app.post("/auth/register", async (req, res) => {
-
   const { username, email, password } = req.body;
 
-  if (!username || !email || !password) {
-    return res.send("All fields are required");
+  const check = new sql.Request();
+  check.input("email", sql.VarChar, email);
+
+  const result = await check.query(`
+    SELECT * FROM Users WHERE Email = @email
+  `);
+
+  if (result.recordset.length > 0) {
+    return res.send("Email exists");
   }
 
-  try {
+  const hash = await bcrypt.hash(password, 10);
 
-    const checkRequest = new sql.Request();
-    checkRequest.input("email", sql.VarChar, email);
+  const insert = new sql.Request();
+  insert.input("username", sql.VarChar, username);
+  insert.input("email", sql.VarChar, email);
+  insert.input("password", sql.VarChar, hash);
 
-    const checkUser = await checkRequest.query(`
-      SELECT * FROM Users WHERE Email = @email
-    `);
+  await insert.query(`
+    INSERT INTO Users (Username, Email, Password)
+    VALUES (@username, @email, @password)
+  `);
 
-    if (checkUser.recordset.length > 0) {
-      return res.send("Email already exists");
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const insertRequest = new sql.Request();
-    insertRequest.input("username", sql.VarChar, username);
-    insertRequest.input("email", sql.VarChar, email);
-    insertRequest.input("password", sql.VarChar, hashedPassword);
-
-    await insertRequest.query(`
-      INSERT INTO Users (Username, Email, Password)
-      VALUES (@username, @email, @password)
-    `);
-
-    res.redirect("/");
-
-  } catch (err) {
-    console.log(err);
-    res.send("Server Error");
-  }
+  res.redirect("/");
 });
 
-
-//  LOGIN 
+// ================= LOGIN =================
 app.post("/auth/login", async (req, res) => {
-
   const { email, password } = req.body;
 
-  if (!email || !password) {
-    return res.send("All fields are required");
+  const request = new sql.Request();
+  request.input("email", sql.VarChar, email);
+
+  const result = await request.query(`
+    SELECT * FROM Users WHERE Email = @email
+  `);
+
+  const user = result.recordset[0];
+
+  const match = await bcrypt.compare(password, user.Password);
+
+  if (!match) return res.send("Invalid credentials");
+
+  req.session.user = {
+    id: user.Id,
+    username: user.Username
+  };
+
+  res.redirect("/home");
+});
+// ================= LOGOUT =================
+app.get("/logout", (req, res) => {
+  req.session.destroy(() => {
+    res.clearCookie("connect.sid");
+    res.redirect("/");
+  });
+});
+// ================= USER =================
+app.get("/user", (req, res) => {
+  if (!req.session.user) return res.json({ username: "Guest" });
+  res.json(req.session.user);
+});
+
+// ================= PRODUCTS =================
+app.get("/product", async (req, res) => {
+  const result = await sql.query(`SELECT * FROM Products`);
+  res.json(result.recordset);
+});
+
+// ================= APPLY PROMO (FINAL FIX) =================
+app.post("/apply-promo", async (req, res) => {
+
+  const { promoCode, productId } = req.body;
+  const userId = req.session.user?.id;
+
+  if (!userId) {
+    return res.json({ success: false, message: "Login required" });
   }
 
   try {
 
-    const request = new sql.Request();
-    request.input("email", sql.VarChar, email);
-
-    const result = await request.query(`
-      SELECT * FROM Users WHERE Email = @email
+    // get product
+    const productRes = await sql.query(`
+      SELECT * FROM Products WHERE Id=${productId}
     `);
 
-    if (result.recordset.length === 0) {
-      return res.send("Invalid email or password");
+    const product = productRes.recordset[0];
+
+    // get promo
+    const promoReq = new sql.Request();
+    promoReq.input("code", sql.VarChar, promoCode);
+
+    const promoResult = await promoReq.query(`
+      SELECT * FROM PromoCodes WHERE Code=@code
+    `);
+
+    if (promoResult.recordset.length === 0) {
+      return res.json({ success: false, message: "Invalid Promo Code" });
     }
 
-    const user = result.recordset[0];
+    const promo = promoResult.recordset[0];
 
-    const isMatch = await bcrypt.compare(password, user.Password);
+    // check already used (IMPORTANT FIX)
+    const checkReq = new sql.Request();
 
-    if (!isMatch) {
-      return res.send("Invalid email or password");
+    checkReq.input("userId", sql.Int, userId);
+    checkReq.input("code", sql.VarChar, promoCode);
+
+    const check = await checkReq.query(`
+  SELECT * FROM UserAppliedPromos
+  WHERE UserId=@userId AND PromoCode=@code
+`);
+
+    if (check.recordset.length > 0) {
+      return res.json({
+        success: false,
+        message: "You already used this promo anywhere"
+      });
     }
 
-    //  SESSION FIXED HERE
-    req.session.user = {
-      id: user.Id,
-      username: user.Username
-    };
+    // calculate price
+    const finalPrice =
+      product.Price - (product.Price * promo.DiscountPercent / 100);
 
-    res.redirect("/home");
+    // save usage
+    const insert = new sql.Request();
+    insert.input("userId", sql.Int, userId);
+    insert.input("productId", sql.Int, productId);
+    insert.input("code", sql.VarChar, promoCode);
+
+    await insert.query(`
+      INSERT INTO UserAppliedPromos (UserId, ProductId, PromoCode)
+      VALUES (@userId, @productId, @code)
+    `);
+
+    res.json({
+      success: true,
+      finalPrice,
+      message: `${promo.DiscountPercent}% applied`
+    });
 
   } catch (err) {
-    console.log(err);
-    res.send("Server Error");
+    res.json({ success: false, message: err.message });
   }
 });
 
-
-//  USER API 
-app.get("/user", (req, res) => {
-
-  if (!req.session.user) {
-    return res.json({ username: "Guest" });
-  }
-
-  res.json({
-    username: req.session.user.username
-  });
-});
-
-
-//  LOGOUT 
-app.get("/logout", (req, res) => {
-
-  req.session.destroy(() => {
-    res.redirect("/");
-  });
-
-});
-
-
-//  START 
-const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+app.listen(5000, () => {
+  console.log("Server running on 5000");
 });
